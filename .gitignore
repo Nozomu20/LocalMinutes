@@ -1,0 +1,23 @@
+# ローカルの実行環境とモデル
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.pt
+*.gguf
+
+# 会議の保存データ
+*.wav
+audio.mp3
+audio.m4a
+audio.mp4
+audio.flac
+audio.ogg
+audio.webm
+audio.aac
+audio.aiff
+meeting.json
+settings.json
+asr.json
+transcript.json
+minutes.md
