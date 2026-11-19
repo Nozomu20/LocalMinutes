@@ -19,11 +19,12 @@
 </section>
 <section id="meeting" hidden><div class="statecard"><div id="phase"></div><p id="detail" aria-live="polite"></p><button id="retry" hidden>議事録を作成</button></div>
 <audio id="player" aria-label="保存した音声を再生" controls preload="metadata" hidden></audio>
+<button id="reanalyze" hidden title="保存済みの音声を現在の設定で解析し、別の議事録に保存します">この音声で新しく解析</button>
 <div class="tabs"><button id="tabSummary" aria-pressed="true">要約</button><button id="tabText" aria-pressed="false">文字起こし</button><button id="export" hidden>↓ Markdown 保存</button></div>
 <div id="speakerActions"></div><article id="content"></article></section>
 </main></div>
 <dialog id="dialog"><h2>ローカル設定</h2>
-<label for="model">Whisper モデル（.pt）</label><input id="model" spellcheck="false"><p>端末内に保存した多言語モデルの絶対パス</p>
+<label for="model">Whisper モデル（.pt）</label><input id="model" spellcheck="false" list="availableModels"><datalist id="availableModels"></datalist><p>インストール済みのモデルを選ぶか、絶対パスを入力してください。large-v3-turbo は精度を重視する場合に使えます。</p>
 <label for="gguf">生成要約モデル（.gguf・任意）</label><input id="gguf" spellcheck="false"><p>空欄の場合は、発言から重要な文を抽出します。生成要約には llama-cpp-python が必要です。</p>
 <h3>会議の保存先</h3><code id="storage"></code><p id="settingsError" role="alert"></p>
 <div class="dialogactions"><button id="cancelSettings">閉じる</button><button class="primary" id="saveSettings">設定を保存</button></div></dialog>

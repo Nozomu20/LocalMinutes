@@ -1,10 +1,11 @@
 const speakerIds = Array.from({ length: 12 }, (_, i) => "S" + (i + 1));
 const pageSize = 20;
 
-export function speakerLabel(id, names) {
-  if (!speakerIds.includes(id)) return "話者未設定";
+export function speakerLabel(id, names, defaultNames = {}) {
+  const index = speakerIds.indexOf(id);
+  if (index < 0) return "話者未設定";
   const name = names?.[id];
-  return (typeof name === "string" && name.trim()) || "話者" + id.slice(1);
+  return (typeof name === "string" && name.trim()) || defaultNames[id] || "話者" + String.fromCharCode(65 + index);
 }
 
 function element(tag, text, className) {
@@ -20,22 +21,22 @@ function timestamp(seconds) {
   return (t >= 3600 ? Math.floor(t / 3600) + ":" : "") + pad(Math.floor(t / 60) % 60) + ":" + pad(t % 60);
 }
 
-export function speakerEditor(segments, names, onSave) {
+export function speakerEditor(segments, names, onSave, defaultNames = {}) {
   const open = element("button", "話者を編集", "speaker-open");
   open.type = "button";
   open.setAttribute("aria-haspopup", "dialog");
   open.disabled = !segments.length;
-  open.onclick = () => showEditor(open, segments, names, onSave);
+  open.onclick = () => showEditor(open, segments, names, onSave, defaultNames);
   return open;
 }
 
-function showEditor(open, segments, names, onSave) {
+function showEditor(open, segments, names, onSave, defaultNames) {
   // 変更は保存されるまで会議データに反映しない。
   const speakers = segments.map(segment => speakerIds.includes(segment.speaker) ? segment.speaker : "");
   const activeIds = new Set(speakers.filter(Boolean));
   const draftNames = {};
   for (const id of speakerIds) {
-    if (typeof names?.[id] === "string") {
+    if (typeof names?.[id] === "string" && names[id] && names[id] !== speakerLabel(id, {}, defaultNames)) {
       activeIds.add(id);
       draftNames[id] = names[id];
     }
@@ -60,24 +61,24 @@ function showEditor(open, segments, names, onSave) {
   const cancel = element("button", "キャンセル");
   const save = element("button", "保存", "primary");
   buttons.append(cancel, save);
-  fields.append(element("h3", "話者名"), nameFields, add, element("h3", "発言ごとの話者"), paging, rows);
+  fields.append(element("h3", "話者名（任意）"), nameFields, add, element("h3", "発言ごとの話者"), paging, rows);
   dialog.append(title, fields, error, buttons);
 
   let page = 0;
   let saving = false;
   function optionLabel(id) {
-    const fallback = speakerLabel(id, {});
-    const label = speakerLabel(id, draftNames);
+    const fallback = speakerLabel(id, {}, defaultNames);
+    const label = speakerLabel(id, draftNames, defaultNames);
     return label === fallback ? fallback : label + "（" + fallback + "）";
   }
   function addNameField(id) {
-    const label = element("label", speakerLabel(id, {}));
+    const label = element("label", speakerLabel(id, {}, defaultNames));
     const input = element("input");
     input.type = "text";
     input.maxLength = 60;
     input.autocomplete = "off";
     input.spellcheck = false;
-    input.placeholder = "名前を入力";
+    input.placeholder = "匿名のまま使えます";
     input.value = draftNames[id] || "";
     input.oninput = () => {
       draftNames[id] = input.value;

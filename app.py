@@ -132,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
                 lib.stop(data["id"],bool(data.get("interrupted")))
             elif path == "/api/process":
                 lib.process(data["id"])
+            elif path == "/api/reanalyze":
+                return self.reply({"id":lib.reanalyze(data["id"])})
             elif path == "/api/settings":
                 lib.configure(data)
             elif path == "/api/speakers":

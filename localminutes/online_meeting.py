@@ -91,7 +91,7 @@ def timed_segment(row, source, speaker, start):
     return {**timed, "speaker": speaker, "source": source}
 
 
-def transcribe_meeting(mic, remote, offset, model, count):
+def transcribe_meeting(mic, remote, offset, model, count, output):
     if not 0 <= count <= 12:
         raise ValueError("話者数は自動（0）または1〜12人で指定してください。")
     mic_start, remote_start = track_starts(offset)
@@ -100,10 +100,21 @@ def transcribe_meeting(mic, remote, offset, model, count):
     rows = [timed_segment(row, "microphone", "S1", mic_start) for row in recognize(mic, model)]
     print("会議相手の音声を文字起こししています…", flush=True)
     heard = recognize(remote, model)
+    warning_path = output.parent / "speaker-warning.json"
+    warning = ""
     if heard:
+        # ネイティブ推論が異常終了しても、認識済みの両トラックを利用できるよう先に確定する。
+        fallback = rows + [timed_segment(row, "remote", "", remote_start) for row in heard]
+        save_result(warning_path, {"message": "相手の話者判定が中断されました。発言は文字起こしに保存されています。"})
+        save_result(output, sorted(fallback, key=lambda row: row["start"]))
         print("相手側の話者を推定しています…", flush=True)
         remote_count = max(1, count - 1) if count else 0
-        for row in diarize(remote, heard, remote_count):
+        try:
+            labeled = diarize(remote, heard, remote_count)
+        except Exception as exc:
+            warning = f"相手の話者判定に失敗しました。発言は「話者を編集」で割り当てられます。{exc}"
+            labeled = heard
+        for row in labeled:
             cluster = row.get("speaker", "")
             # 自分のIDを予約する。特徴不足や自動推定が上限を超えた発言は手動で割り当てられる。
             speaker = ""
@@ -113,7 +124,8 @@ def transcribe_meeting(mic, remote, offset, model, count):
                     speaker = f"S{index + 1}"
             rows.append(timed_segment(row, "remote", speaker, remote_start))
     # 同時に話した発言も各トラックのまま残す。
-    return sorted(rows, key=lambda row: row["start"])
+    save_result(output, sorted(rows, key=lambda row: row["start"]))
+    save_result(warning_path, {"message": warning})
 
 
 def main():
@@ -142,7 +154,9 @@ def main():
         if args.action == "mix":
             mix(args.mic, args.remote, args.offset, args.output)
         else:
-            save_result(args.output, transcribe_meeting(args.mic, args.remote, args.offset, args.model, args.count))
+            if args.output.resolve() == (args.output.parent / "speaker-warning.json").resolve():
+                raise ValueError("文字起こしの保存先が話者判定の状態ファイルと同じです。")
+            transcribe_meeting(args.mic, args.remote, args.offset, args.model, args.count, args.output)
     except Exception as exc:
         print(str(exc), file=sys.stderr, flush=True)
         return 1

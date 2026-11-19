@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 *.pt
+*.onnx
 *.gguf
 
 # 会議の保存データ
@@ -19,5 +20,6 @@ audio.aiff
 meeting.json
 settings.json
 asr.json
+speaker-warning.json
 transcript.json
 minutes.md

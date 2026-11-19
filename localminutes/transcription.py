@@ -136,6 +136,21 @@ def chunks(blocks, np):
         yield np.concatenate(parts)
 
 
+def has_audio(samples, np):
+    peak = float(np.max(np.abs(samples)))
+    if peak <= 0.0001:
+        return False
+    # 非常に小さい定常ノイズだけのトラックでWhisperが架空の発言を作るのを避ける。
+    # 声量が小さくても、音節による強弱が残っている音声は認識に渡す。
+    frame = RATE // 50
+    if peak > 0.003 or len(samples) < 2 * frame:
+        return True
+    frames = samples[:len(samples) // frame * frame].reshape(-1, frame)
+    levels = np.sqrt(np.mean(frames * frames, axis=1))
+    audible = levels[levels > 0.00003]
+    return bool(len(audible) and max(audible) > 1.6 * np.quantile(audible, 0.2))
+
+
 def transcribe(audio, model_path):
     try:
         import numpy as np
@@ -166,10 +181,15 @@ def transcribe(audio, model_path):
         begin = offset / RATE
         offset += len(samples)
         duration = len(samples) / RATE
-        if np.max(np.abs(samples)) > 0.0001:
+        if has_audio(samples, np):
             result = model.transcribe(
                 samples, language="ja", task="transcribe", fp16=device == "cuda",
-                verbose=None, temperature=0.0, condition_on_previous_text=False, word_timestamps=True,
+                # 文体だけを与え、会議固有の発言・氏名・数値をモデルに誘導しない。
+                initial_prompt="これは日本語の会議の発言記録です。",
+                # 通常はビーム探索。確率が低い・同じ文を繰り返す区間だけ再試行する。
+                beam_size=5, temperature=(0.0, 0.2, 0.4, 0.6), best_of=3,
+                condition_on_previous_text=False, word_timestamps=True,
+                hallucination_silence_threshold=2.0, verbose=None,
             )
             for segment in result["segments"]:
                 text = segment["text"].strip()

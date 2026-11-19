@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -11,6 +12,7 @@ import time
 import uuid
 import wave
 from .system_audio import SystemAudio
+from .summary import default_speaker_label
 
 ROOT = Path(__file__).resolve().parents[1]
 FORMATS = {".wav", ".mp3", ".m4a", ".mp4", ".flac", ".ogg", ".webm", ".aac", ".aiff"}
@@ -38,12 +40,12 @@ def speaker_count(value):
     return value
 
 
-def named_summary(text, segments, names):
-    source = re.compile(r"^(- \([^\n)]*\))(?:【話者\d+】)?<!--lm:(\d+)-->", re.M)
+def named_summary(text, segments, names, online=False):
+    source = re.compile(r"^(- \([^\n)]*\))(?:【[^】\n]*】)?<!--lm:(\d+)-->", re.M)
     def attribution(match):
         index = int(match[2])
         who = segments[index].get("speaker", "") if index < len(segments) else ""
-        name = names.get(who) or ("話者"+who[1:] if who else "話者未設定")
+        name = names.get(who) or default_speaker_label(who,online)
         name = re.sub(r"([\\`*_\[\]~|])",r"\\\1",
                       name.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
         return f"{match[1]}【{name}】"
@@ -75,7 +77,9 @@ class Library:
         self.worker = None
         self.closed = False
         self.rows = {}
-        self.settings = {"model": str(Path.home() / ".cache/whisper/small.pt"), "gguf": ""}
+        self.model_dir = Path.home() / ".cache/whisper"
+        turbo = self.model_dir / "large-v3-turbo.pt"
+        self.settings = {"model": str(turbo if turbo.is_file() else self.model_dir/"small.pt"), "gguf": ""}
         if (root / "settings.json").exists():
             self.settings.update(self.read(root / "settings.json"))
         for path in root.glob("*/meeting.json"):
@@ -92,7 +96,9 @@ class Library:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def settings_view(self):
+        models = [str(p) for p in (self.model_dir/"small.pt", self.model_dir/"large-v3-turbo.pt") if p.is_file()]
         return {**self.settings, "ready": Path(self.settings["model"]).is_file(),
+                "installedModels": models,
                 "storage": str(self.root)}
 
     def configure(self, data):
@@ -255,6 +261,37 @@ class Library:
             self.mark(m, status="processing", detail="処理を準備しています")
             threading.Thread(target=self.pipeline, args=(m, self.settings.copy()), daemon=True).start()
 
+    def reanalyze(self, key):
+        """保存済みの音声から新しい議事録を作る。元の議事録の氏名・訂正は保持する。"""
+        with self.mu:
+            old = self.rows[key]
+            folder = self.root/key
+            online = old.get("mode")=="online"
+            files = ["mic.wav","remote.wav"] if online else [old["audio"]]
+            if old["status"] not in ("done","error","ready") or not all((folder/name).is_file() for name in files):
+                raise ValueError("再解析できる保存済み音声がありません。")
+            m = self.new(old["title"]+"（再解析）",Path(old["audio"]).suffix,"importing",old.get("speakerCount",0))
+        try:
+            for name in files:
+                src, dst = folder/name, self.root/m["id"]/name
+                try:
+                    os.link(src,dst)
+                except OSError:
+                    stage = dst.with_suffix(".part")
+                    shutil.copyfile(src,stage)
+                    stage.replace(dst)
+            with self.mu:
+                self.mark(m,mode=old.get("mode","microphone"),remoteOffset=old.get("remoteOffset",0),
+                          captureWarning=old.get("captureWarning",""),duration=old.get("duration",0),status="ready")
+                self.active = None
+                self.process(m["id"])
+            return m["id"]
+        except Exception as exc:
+            with self.mu:
+                self.active = None
+                self.mark(m,status="error",detail=str(exc))
+            raise
+
     def command(self, m, module, args, label):
         env = {**os.environ, "PYTHONIOENCODING":"utf-8", "PYTHONUNBUFFERED":"1",
                "HF_HUB_OFFLINE":"1", "TRANSFORMERS_OFFLINE":"1", "PYTHONDONTWRITEBYTECODE":"1"}
@@ -296,17 +333,17 @@ class Library:
                         with self.mu:
                             self.mark(m,status="ready",detail="音声を保存しました。設定でWhisperモデルを指定してください。")
                         return
-                    self.command(m,"online_meeting",
-                                 ["transcribe",*tracks,settings["model"],m.get("speakerCount",0),transcript],
-                                 "マイクとPC音声を個別に文字起こし中")
-                if "names" not in m:
-                    names = {"S1":"自分"}
-                    for s in self.read(transcript):
-                        identifier = s.get("speaker","")
-                        if re.fullmatch(r"S(?:[2-9]|1[0-2])",identifier):
-                            names[identifier] = f"相手{int(identifier[1:])-1}"
+                    try:
+                        self.command(m,"online_meeting",
+                                     ["transcribe",*tracks,settings["model"],m.get("speakerCount",0),transcript],
+                                     "マイクとPC音声を個別に文字起こし中")
+                    except ValueError:
+                        if self.closed or not transcript.exists() or not (folder/"speaker-warning.json").is_file():
+                            raise
+                warning_file = folder/"speaker-warning.json"
+                if warning_file.is_file():
                     with self.mu:
-                        self.mark(m,names=names)
+                        self.mark(m,speakerWarning=self.read(warning_file).get("message",""))
             elif not transcript.exists():
                 raw = folder / "asr.json"
                 if not raw.exists():
@@ -344,9 +381,15 @@ class Library:
                 if "assignments" in m:
                     s["speaker"] = m["assignments"][i]
             names = m.get("names", {})
+            online = m.get("mode") == "online"
+            if online and not m.get("revision"):
+                # 旧版が自動設定した仮名だけを新版の既定表示に読み替える。
+                names = {k:v for k,v in names.items() if not (
+                    k=="S1" and v=="自分" or re.fullmatch(r"S(?:[2-9]|1[0-2])",k) and v==f"相手{int(k[1:])-1}")}
+            defaults = {f"S{i}":default_speaker_label(f"S{i}",online) for i in range(1,13)}
             summary = (path/"minutes.md").read_text(encoding="utf-8") if m["hasSummary"] else ""
-            return {"segments":segments, "names":names, "revision":m.get("revision",0),
-                    "summary":named_summary(summary,segments,names)}
+            return {"segments":segments, "names":names, "defaultNames":defaults,"revision":m.get("revision",0),
+                    "summary":named_summary(summary,segments,names,online)}
 
     def edit_speakers(self, key, speakers, names, revision):
         with self.mu:

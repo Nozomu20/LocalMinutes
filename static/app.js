@@ -77,7 +77,8 @@ function viewResult() {
       await post("speakers",{id:key,revision,...edits});
       resultKey="";
       await refresh();
-    }));
+    },result.defaultNames));
+    if (tab==="text") actions.append(node("p","話者は音声から推定しています。発言時刻を押すと聞き直せます。","empty"));
   }
   el("export").hidden = !result;
   if (!result) {
@@ -94,7 +95,7 @@ function viewResult() {
         catch {notify("このブラウザで音声を再生できません。元の音声は会議の保存先にあります。");}
       };
       const body=node("div","");
-      body.append(node("strong",speakerLabel(s.speaker,result.names),"attribution"),node("span",s.text));
+      body.append(node("strong",speakerLabel(s.speaker,result.names,result.defaultNames),"attribution"),node("span",s.text));
       row.append(seek,body); area.append(row);
     }
   } else {
@@ -140,6 +141,8 @@ function render() {
   el("record").disabled=busy || Boolean(state.active && !recId);
   el("record").textContent=recId?"■　録音を停止":"●　録音を開始";
   const online=el("mode").value==="online";
+  el("count").labels[0].textContent=online ? "会議の話者数（自分を含む）" : "会議の話者数";
+  el("count").options[0].textContent="自動推定（分かる場合は人数を選択）";
   el("inputs").hidden=!online;
   el("wave").hidden=online;
   const capture=state.capture;
@@ -157,6 +160,7 @@ function render() {
     el("phase").textContent=phases[item.status]+(item.duration?"　·　"+stamp(item.duration):"");
     el("detail").textContent=[item.detail,item.captureWarning,item.speakerWarning].filter(Boolean).join(" ");
     el("retry").hidden=Boolean(state.active) || item.captureFailed || !["error","ready"].includes(item.status);
+    el("reanalyze").hidden=Boolean(state.active) || !item.hasTranscript || !item.playback;
   }
 }
 async function refresh() {
@@ -231,6 +235,14 @@ el("retry").onclick=async()=>{
   try {await post("process",{id:selected}); await refresh();}catch(e){notify(e.message);}
   finally{el("retry").disabled=false;}
 };
+el("reanalyze").onclick=async()=>{
+  el("reanalyze").disabled=true;
+  try {
+    const meeting=await post("reanalyze",{id:selected});
+    select(meeting.id);
+  } catch(error) {notify(error.message);}
+  finally {el("reanalyze").disabled=false;}
+};
 el("tabText").onclick=()=>{tab="text";viewResult();};
 el("tabSummary").onclick=()=>{tab="summary";viewResult();};
 el("export").onclick=()=>{
@@ -238,7 +250,7 @@ el("export").onclick=()=>{
   if(!m||!result)return;
   const escapeText=value=>value.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replace(/[\\*_\[\]`|~]/g,"\\$&");
   const text=["# "+escapeText(m.title), day(m.date),result.summary,"## 文字起こし",
-    ...result.segments.map(s=>"- ("+stamp(s.start)+")【"+escapeText(speakerLabel(s.speaker,result.names))+"】 "+escapeText(s.text))].join("\n\n");
+    ...result.segments.map(s=>"- ("+stamp(s.start)+")【"+escapeText(speakerLabel(s.speaker,result.names,result.defaultNames))+"】 "+escapeText(s.text))].join("\n\n");
   const url=URL.createObjectURL(new Blob([text],{type:"text/markdown;charset=utf-8"}));
   const a=document.createElement("a");a.href=url;
   a.download=m.title.replace(/[<>:"/\\|?*\x00-\x1f]/g,"_").slice(0,80)+".md";
@@ -247,6 +259,7 @@ el("export").onclick=()=>{
 el("settings").onclick=()=>{
   if(!state)return;
   el("model").value=state.settings.model;el("gguf").value=state.settings.gguf;
+  el("availableModels").replaceChildren(...state.settings.installedModels.map(path=>new Option(path)));
   el("storage").textContent=state.settings.storage;el("settingsError").textContent="";
   el("dialog").showModal();
 };
