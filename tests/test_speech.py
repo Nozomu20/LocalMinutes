@@ -31,6 +31,25 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(index.speaker(1.1, 1.4), "")
         self.assertEqual(index.speaker(4.1, 5.0), "")
 
+    def test_word_just_before_speech_onset_stays_with_its_phrase(self):
+        index = TurnIndex([{"start": 1.05, "end": 2.0, "speaker": "S2"}])
+        words = [
+            {"start": 0.56, "end": 1.0, "word": "お"},
+            {"start": 1.0, "end": 1.8, "word": "金はどこ？"},
+        ]
+        row = {"start": 0.56, "end": 1.8, "text": "お金はどこ？", "words": words}
+        parts = label_segment(row, index)
+        self.assertEqual([(p["speaker"], p["text"]) for p in parts], [("S2", "お金はどこ？")])
+
+    def test_word_between_two_nearby_speakers_remains_unassigned(self):
+        index = TurnIndex([
+            {"start": 0.0, "end": 1.0, "speaker": "S1"},
+            {"start": 1.2, "end": 2.0, "speaker": "S2"},
+        ])
+        word = {"start": 1.08, "end": 1.14, "word": "え"}
+        row = {"start": 1.08, "end": 1.14, "text": "え", "words": [word]}
+        self.assertEqual(label_segment(row, index)[0]["speaker"], "")
+
     def test_quiet_stationary_noise_and_quiet_varying_signal(self):
         rng = np.random.default_rng(742)
         noise = rng.normal(0, 8 / 32768, RATE * 2).astype(np.float32)

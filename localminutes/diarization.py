@@ -96,7 +96,8 @@ class TurnIndex:
         self.starts = [t["start"] for t in self.turns]
         self.ends = list(accumulate((t["end"] for t in self.turns), max))
 
-    def speaker(self, start, end):
+    def speaker(self, start, end, *, word=False):
+        word_start, word_end = start, end
         # 長さゼロの句読点にも、この時刻を含む発話があれば割り当てる。
         if start == end:
             start, end = max(0.0, start - 0.02), end + 0.02
@@ -108,6 +109,13 @@ class TurnIndex:
             if overlap > 0:
                 coverage[turn["speaker"]] += overlap
         if not coverage:
+            if word and 0 <= word_end - word_start <= 0.5:
+                # ASRと発話検出器のわずかな境界ずれだけを補う。
+                left, right = word_start - 0.12, word_end + 0.12
+                first, last = bisect_left(self.ends, left), bisect_right(self.starts, right)
+                nearby = {t["speaker"] for t in self.turns[first:last] if t["end"] >= left}
+                if len(nearby) == 1:
+                    return nearby.pop()
             return ""
         ranked = sorted(coverage, key=coverage.get, reverse=True)
         if len(ranked) > 1 and coverage[ranked[1]] >= 0.9 * coverage[ranked[0]]:
@@ -132,7 +140,7 @@ def label_segment(row, index):
             return [default]
         if not (math.isfinite(start) and math.isfinite(end) and end >= start):
             return [default]
-        labels.append(index.speaker(start, end))
+        labels.append(index.speaker(start, end, word=True))
 
     # 句読点単独の認識トークンは隣の発言に含め、同時発話中の不明な語は未設定で残す。
     for i, w in enumerate(words):
