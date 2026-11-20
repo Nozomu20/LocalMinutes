@@ -1,17 +1,52 @@
-async function writeChunk(onChunk, buffer) {
-  const controller = new AbortController();
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error("音声の保存がタイムアウトしました。ローカルサーバーを確認してください。"));
-    }, 15000);
-  });
-  try {
-    await Promise.race([onChunk(buffer, controller.signal), timeout]);
-  } finally {
-    clearTimeout(timer);
+const MAX_BATCH_BYTES = 2 * 1024 * 1024;
+
+async function writeChunk(onChunk, buffer, startOffset) {
+  const delays = [250, 1000, 2000];
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("音声の保存がタイムアウトしました。ローカルサーバーを確認してください。"));
+      }, 20000);
+    });
+    let retry = false;
+    let endOffset;
+    try {
+      endOffset = await Promise.race([onChunk(buffer, controller.signal, startOffset), timeout]);
+    } catch (error) {
+      // 同じ位置・同じデータで再送する。応答だけが失われても二重に書き込まれない。
+      const retryable = controller.signal.aborted || error instanceof TypeError ||
+        error?.status === 408 || error?.status === 429 || error?.status >= 500;
+      if (!retryable || attempt >= delays.length) throw error;
+      retry = true;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (retry) {
+      await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+      continue;
+    }
+    if (endOffset !== startOffset + buffer.byteLength) throw new Error("録音データの保存位置を確認できません。");
+    return endOffset;
   }
+}
+
+function nextBatch(queue) {
+  let count = 1;
+  let size = queue[0].byteLength;
+  while (count < queue.length && size + queue[count].byteLength <= MAX_BATCH_BYTES) {
+    size += queue[count++].byteLength;
+  }
+  if (count === 1) return queue.shift();
+  const batch = new Uint8Array(size);
+  let offset = 0;
+  for (const block of queue.splice(0, count)) {
+    batch.set(new Uint8Array(block), offset);
+    offset += block.byteLength;
+  }
+  return batch.buffer;
 }
 
 async function openMicrophone() {
@@ -35,13 +70,15 @@ export class Recorder {
     this.phase = "idle";
   }
 
-  async start(onStart, onChunk) {
+  async start(onStart, onChunk, onSamples) {
     if (this.phase !== "idle") throw new Error("録音の開始または停止処理が進行中です。");
     this.phase = "starting";
     this.failure = null;
     this.writeFailed = false;
-    this.writes = Promise.resolve();
-    this.starting = this.open(onStart, onChunk);
+    this.queue = [];
+    this.writes = null;
+    this.savedBytes = 0;
+    this.starting = this.open(onStart, onChunk, onSamples);
     try {
       await this.starting;
     } catch (error) {
@@ -51,7 +88,7 @@ export class Recorder {
     }
   }
 
-  async open(onStart, onChunk) {
+  async open(onStart, onChunk, onSamples) {
     if (!window.AudioContext) throw new Error("このブラウザは録音に対応していません。");
     this.context = new AudioContext();
     // ユーザーのクリック中にAudioContextを再開する。
@@ -66,18 +103,11 @@ export class Recorder {
     });
     this.node.port.onmessage = ({ data }) => {
       if (data === "flushed") this.flushed?.();
-      else if (data === "overrun") this.fail(new Error("音声の保存が追いつかず、録音を中断しました。"));
-      else if (data instanceof ArrayBuffer) {
-        this.writes = this.writes.then(async () => {
-          if (this.writeFailed) return;
-          try {
-            await writeChunk(onChunk, data);
-            this.node?.port.postMessage("ack");
-          } catch (error) {
-            this.writeFailed = true;
-            this.fail(error);
-          }
-        });
+      else if (data === "overrun") this.fail(new Error("未保存の音声が一時バッファの上限に達したため、マイク録音を中断しました。保存済みの範囲は会議履歴から確認できます。"));
+      else if (data instanceof ArrayBuffer && !this.writeFailed) {
+        this.queue.push(data);
+        if (!this.writes) this.writes = this.drain(onChunk);
+        onSamples?.(data);
       }
     };
     const track = this.stream.getAudioTracks()[0];
@@ -94,6 +124,22 @@ export class Recorder {
     if (this.failure) throw this.failure;
     this.node.connect(this.context.destination);
     this.source.connect(this.node);
+  }
+
+  async drain(onChunk) {
+    try {
+      while (this.queue.length) {
+        const buffer = nextBatch(this.queue);
+        this.savedBytes = await writeChunk(onChunk, buffer, this.savedBytes);
+        this.node.port.postMessage({savedBytes: this.savedBytes});
+      }
+    } catch (error) {
+      this.writeFailed = true;
+      this.queue.length = 0;
+      this.fail(error);
+    } finally {
+      this.writes = null;
+    }
   }
 
   fail(error) {

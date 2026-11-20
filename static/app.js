@@ -28,7 +28,11 @@ async function api(path, options={}) {
   const response = await fetch("/api/"+path, {...options, cache:"no-store",
     headers:{Authorization:"Bearer "+token, ...options.headers}});
   const data = await response.json();
-  if (!response.ok) throw Error(data.error || "端末内のサーバーで処理できませんでした。");
+  if (!response.ok) {
+    const error = new Error(data.error || "端末内のサーバーで処理できませんでした。");
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 const post = (path,data) => api(path,{method:"POST",body:JSON.stringify(data)});
@@ -41,16 +45,19 @@ function node(tag, text, cls="") {
 function draw() {
   const canvas = el("wave"), width = canvas.clientWidth;
   if (!width) return;
-  canvas.width = width * devicePixelRatio;
-  canvas.height = 70 * devicePixelRatio;
+  const pixels = Math.round(width * devicePixelRatio), height = Math.round(70 * devicePixelRatio);
+  if (canvas.width !== pixels) canvas.width = pixels;
+  if (canvas.height !== height) canvas.height = height;
   const c = canvas.getContext("2d");
-  c.scale(devicePixelRatio,devicePixelRatio);
+  c.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  c.clearRect(0,0,width,70);
   c.strokeStyle="#628d6a"; c.lineWidth=2; c.lineCap="round"; c.beginPath();
   samples.forEach((v,i) => { const x=(i+.5)*width/samples.length, a=Math.min(30,1+v*90);
     c.moveTo(x,35-a); c.lineTo(x,35+a); });
   c.stroke();
 }
 function addSamples(buffer) {
+  if (document.hidden) return;
   const data = new Int16Array(buffer);
   let peak = 0;
   for (let n=0;n<5;n++) {
@@ -139,7 +146,8 @@ function render() {
   el("count").disabled=busy || Boolean(recId);
   el("mode").disabled=busy || Boolean(recId);
   el("record").disabled=busy || Boolean(state.active && !recId);
-  el("record").textContent=recId?"■　録音を停止":"●　録音を開始";
+  const finalizing=busy && recId && !started;
+  el("record").textContent=finalizing?"録音を保存中…":(recId?"■　録音を停止":"●　録音を開始");
   const online=el("mode").value==="online";
   el("count").labels[0].textContent=online ? "会議の話者数（自分を含む）" : "会議の話者数";
   el("count").options[0].textContent="自動推定（分かる場合は人数を選択）";
@@ -155,7 +163,8 @@ function render() {
     if (el("pcInfo").textContent!==status) el("pcInfo").textContent=status;
   }
   el("micStatus").textContent=online ? (recId?"オンライン会議を録音中":"オンライン会議の録音") : (recId?"マイク録音中":"マイク録音");
-  el("recHint").textContent=recId?"この画面を開いたまま録音してください":(online && busy?"音声入力の準備中です。OSの許可画面が出た場合は確認してください。":"停止すると議事録を作成します");
+  if (finalizing) el("recHint").textContent="残りの音声を端末に保存しています。この画面を開いたままお待ちください。";
+  else el("recHint").textContent=recId?"この画面を開いたまま録音してください":(online && busy?"音声入力の準備中です。OSの許可画面が出た場合は確認してください。":"停止すると議事録を作成します");
   if (item) {
     el("phase").textContent=phases[item.status]+(item.duration?"　·　"+stamp(item.duration):"");
     el("detail").textContent=[item.detail,item.captureWarning,item.speakerWarning].filter(Boolean).join(" ");
@@ -185,15 +194,18 @@ function select(id) {
 }
 async function begin() {
   busy=true; startingError=null; notify(); render(); samples.fill(0); draw();
+  let micStartedAt;
   try {
     await recorder.start(async rate => {
       el("recHint").textContent=el("mode").value==="online"?"PC音声の入力を準備中です。OSの許可画面が出た場合は確認してください。":"マイクを準備しています";
       recId=(await post("start",{title:el("title").value,rate,count:Number(el("count").value),mode:el("mode").value})).id;
-      started=Date.now();
-    },async (buffer,signal) => {
-      addSamples(buffer);
-      await api("chunk/"+recId,{method:"POST",body:buffer,signal});
-    });
+      micStartedAt=started=Date.now();
+    },async (buffer,signal,byteOffset) => {
+      const headers={"X-PCM-Offset":String(byteOffset)};
+      if (byteOffset===0) headers["X-PCM-Started-At"]=String(micStartedAt);
+      const response=await api("chunk/"+recId,{method:"POST",headers,body:buffer,signal});
+      return response.nextOffset;
+    },addSamples);
     if (startingError) throw startingError;
   } catch(error) {
     if (recId) {
@@ -206,9 +218,13 @@ async function begin() {
 }
 async function finish(error) {
   if (busy || !recId) return;
-  busy=true; render();
+  busy=true; started=0; render();
   const id=recId;
-  try {await recorder.stop();} catch(e) {error=e;}
+  const draining=recorder.stop();
+  // PC音声は、マイクの未保存分を書き終わるのを待たずに止める。
+  // 応答が途切れた場合も、最後の stop で両入力を確実に閉じる。
+  if (el("mode").value==="online") post("stop-input",{id}).catch(()=>{});
+  try {await draining;} catch(e) {error=e;}
   try {await post("stop",{id,interrupted:Boolean(error)});} catch(e){error=error||e;}
   recId=null; started=0; busy=false; el("timer").textContent="00:00";
   select(id); if(error) notify(error.message);

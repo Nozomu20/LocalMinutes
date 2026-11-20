@@ -17,6 +17,8 @@ from .summary import default_speaker_label
 ROOT = Path(__file__).resolve().parents[1]
 FORMATS = {".wav", ".mp3", ".m4a", ".mp4", ".flac", ".ogg", ".webm", ".aac", ".aiff"}
 LIMIT = 2 * 1024**3
+# ブラウザが一時的に休止しても、保存待ちPCMを送信できるまで録音を維持する。
+RECORDING_IDLE_TIMEOUT = 180
 
 
 def save_json(path, value):
@@ -173,21 +175,56 @@ class Library:
                 self.mark(m, status="error", captureFailed=True, detail=str(exc))
             raise
 
-    def chunk(self, key, data):
+    def chunk(self, key, data, offset=None, started_at_ms=None):
         with self.mu:
             if key != self.active or self.wav is None or not data or len(data)%2:
                 raise ValueError("録音データを追加できません。")
-            if self.frames * 2 + len(data) > LIMIT:
+            written = self.frames * 2
+            if offset is None:
+                # 旧版の録音画面は各リクエストを一度だけ順番に送る。
+                offset = written
+            if type(offset) is not int or not 0 <= offset <= written or offset % 2:
+                raise ValueError("録音データの保存位置が一致しません。")
+            end = offset + len(data)
+            if offset < written:
+                if end > written:
+                    raise ValueError("録音データが保存済み範囲と部分的に重なっています。")
+                # 書き込み後に応答だけ失われる場合がある。保存済みの同じPCMは二重に追記しない。
+                m = self.rows[key]
+                name = "mic.wav" if m.get("mode") == "online" else m["audio"]
+                with wave.open(str(self.root/key/name), "rb") as saved:
+                    saved.setpos(offset // 2)
+                    if saved.readframes(len(data) // 2) != data:
+                        raise ValueError("再送された録音データが保存済みの内容と一致しません。")
+                self.last_chunk = time.monotonic()
+                return end
+            if end > LIMIT:
                 raise ValueError("録音が2 GiBに達しました。別の会議で続けてください。")
-            if self.capture and not self.frames:
-                # 先頭PCMの受信時刻と長さから、ブラウザでのマイク開始時刻を合わせる。
-                first_sample = max(self.last_chunk,time.monotonic()-len(data)/(2*self.rate))
-                self.mark(self.rows[key], remoteOffset=self.capture.start_time-first_sample)
+            if self.capture and not self.frames and type(started_at_ms) is int and 0 < started_at_ms < 2**53:
+                # 同じ端末のブラウザがマイク接続時に採った時計を使用する。
+                # 先頭データが遅れて届いても、その送信待ち時間を録音トラックに足さない。
+                now = time.monotonic()
+                first_sample = now + (started_at_ms - time.time() * 1000) / 1000
+                if self.last_chunk - 0.05 <= first_sample <= now + 0.05:
+                    first_sample = max(self.last_chunk,min(now,first_sample))
+                    self.mark(self.rows[key], remoteOffset=self.capture.start_time-first_sample)
             self.wav.writeframes(data)
             self.frames += len(data)//2
             self.last_chunk = time.monotonic()
             if self.capture and self.capture.status()["error"]:
                 raise ValueError(self.capture.status()["error"])
+            return end
+
+    def stop_input(self, key):
+        """マイクの未送信データの保存と独立して、OSの音声収録を終了する。"""
+        with self.mu:
+            m = self.rows[key]
+            if key != self.active or self.wav is None:
+                if m["status"] in ("ready","error","processing","done"):
+                    return
+                raise ValueError("停止する録音が見つかりません。")
+            if self.capture:
+                self.capture.stop()
 
     def stop(self, key, interrupted=False):
         with self.mu:
@@ -207,11 +244,18 @@ class Library:
                     self.wav.close()
                 finally:
                     self.wav = self.active = self.capture = None
-            self.mark(m, duration=self.frames/self.rate, status="ready" if self.frames else "error", captureWarning=warning,
+            duration = self.frames / self.rate
+            if not self.frames and m.get("mode") == "online":
+                try:
+                    with wave.open(str(self.root/key/"remote.wav"),"rb") as remote:
+                        duration = remote.getnframes() / remote.getframerate()
+                except (OSError, EOFError, wave.Error):
+                    pass
+            self.mark(m, duration=duration, status="ready" if duration else "error", captureWarning=warning,
                       detail="録音が中断されました。保存できた音声を確認してください。" if interrupted else "")
-            if (self.frames or m.get("mode")=="online") and not interrupted:
+            if duration and not interrupted:
                 self.process(key)
-            elif not self.frames:
+            elif not duration:
                 self.mark(m, detail="音声を取得できませんでした。マイクを確認してください。")
 
     def import_audio(self, title, suffix, stream, size, count=0):
@@ -431,6 +475,11 @@ class Library:
                 self.worker.terminate()
 
     def tick(self):
-        with self.mu:
-            if self.wav and time.monotonic()-self.last_chunk > (15 if self.capture else 90):
+        # 保存処理がディスクを待っている間も、HTTPの受付ループを塞がない。
+        if not self.mu.acquire(blocking=False):
+            return
+        try:
+            if self.wav and time.monotonic()-self.last_chunk > RECORDING_IDLE_TIMEOUT:
                 self.stop(self.active, True)
+        finally:
+            self.mu.release()

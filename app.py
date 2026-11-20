@@ -122,14 +122,20 @@ class Handler(BaseHTTPRequestHandler):
                                        self.rfile, size, int(self.headers.get("X-Speaker-Count","0")))
                 return self.reply({"id":key})
             if path.startswith("/api/chunk/"):
-                lib.chunk(path.split("/")[-1], self.body(2*1024**2))
-                return self.reply({})
+                offset = self.headers.get("X-PCM-Offset")
+                started = self.headers.get("X-PCM-Started-At")
+                end = lib.chunk(path.split("/")[-1], self.body(2*1024**2),
+                                int(offset) if offset is not None else None,
+                                int(started) if started is not None else None)
+                return self.reply({"nextOffset":end})
             data = json.loads(self.body(2*1024**2 if path == "/api/speakers" else 16384) or b"{}")
             if path == "/api/start":
                 return self.reply({"id":lib.start(data.get("title"),data.get("rate"),data.get("count",0),
                                                   data.get("mode","microphone"))})
             if path == "/api/stop":
                 lib.stop(data["id"],bool(data.get("interrupted")))
+            elif path == "/api/stop-input":
+                lib.stop_input(data["id"])
             elif path == "/api/process":
                 lib.process(data["id"])
             elif path == "/api/reanalyze":
