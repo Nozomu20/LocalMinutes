@@ -17,7 +17,7 @@ async function writeChunk(onChunk, buffer, startOffset) {
       endOffset = await Promise.race([onChunk(buffer, controller.signal, startOffset), timeout]);
     } catch (error) {
       // 同じ位置・同じデータで再送する。応答だけが失われても二重に書き込まれない。
-      const retryable = controller.signal.aborted || error instanceof TypeError ||
+      const retryable = controller.signal.aborted || error instanceof TypeError || error instanceof SyntaxError ||
         error?.status === 408 || error?.status === 429 || error?.status >= 500;
       if (!retryable || attempt >= delays.length) throw error;
       retry = true;

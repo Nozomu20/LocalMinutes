@@ -27,13 +27,13 @@ function notify(message="") {
 async function api(path, options={}) {
   const response = await fetch("/api/"+path, {...options, cache:"no-store",
     headers:{Authorization:"Bearer "+token, ...options.headers}});
-  const data = await response.json();
   if (!response.ok) {
-    const error = new Error(data.error || "端末内のサーバーで処理できませんでした。");
+    const detail = await response.json().catch(()=>null);
+    const error = new Error(detail?.error || "端末内のサーバーで処理できませんでした。");
     error.status = response.status;
     throw error;
   }
-  return data;
+  return response.json();
 }
 const post = (path,data) => api(path,{method:"POST",body:JSON.stringify(data)});
 function node(tag, text, cls="") {
